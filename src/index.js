@@ -18,6 +18,8 @@ const PBKDF2_MAX_ITERS = 100000; // Cloudflare Workers WebCrypto limit
 const PBKDF2_MIN_ITERS = 10000; // sensible floor
 
 let USERS_HAS_PASS_ITERS = null;
+let ALIASES_HAS_DOMAIN = null;
+let EMAILS_HAS_DOMAIN = null;
 
 // -------------------- Response helpers --------------------
 function json(data, status = 200, headers = {}) {
@@ -168,6 +170,28 @@ async function usersHasPassIters(env) {
     USERS_HAS_PASS_ITERS = false;
   }
   return USERS_HAS_PASS_ITERS;
+}
+
+async function aliasesHasDomain(env) {
+  if (ALIASES_HAS_DOMAIN !== null) return ALIASES_HAS_DOMAIN;
+  try {
+    const res = await env.DB.prepare(`PRAGMA table_info(aliases)`).all();
+    ALIASES_HAS_DOMAIN = (res.results || []).some((r) => r?.name === "domain");
+  } catch {
+    ALIASES_HAS_DOMAIN = false;
+  }
+  return ALIASES_HAS_DOMAIN;
+}
+
+async function emailsHasDomain(env) {
+  if (EMAILS_HAS_DOMAIN !== null) return EMAILS_HAS_DOMAIN;
+  try {
+    const res = await env.DB.prepare(`PRAGMA table_info(emails)`).all();
+    EMAILS_HAS_DOMAIN = (res.results || []).some((r) => r?.name === "domain");
+  } catch {
+    EMAILS_HAS_DOMAIN = false;
+  }
+  return EMAILS_HAS_DOMAIN;
 }
 
 function getAllowedDomains(env) {
@@ -1187,7 +1211,7 @@ const PAGES = {
       </div>
 
       <script>
-        const DOMAIN = '${domain}';
+        const DEFAULT_DOMAIN = ${JSON.stringify(domains[0] || "")};
         function esc(s){return (s||'').replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));}
 
         async function api(path, opts){
@@ -1274,9 +1298,10 @@ const PAGES = {
           let html = '<div style="padding:10px;background:rgba(255,255,255,.02);border-radius:12px;border:1px solid var(--border)">';
           html += '<div class="muted" style="margin-bottom:10px;font-size:13px"><b>📧 Daftar Mail:</b></div>';
           for(const a of j.aliases){
+            const aliasDomain = a.domain || DEFAULT_DOMAIN;
             html += '<div style="padding:10px 0;border-bottom:1px solid rgba(71,85,105,.25);display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">'+
               '<div style="flex:1;min-width:0;overflow-wrap:break-word">'+
-                '<div style="font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all"><b>'+esc(a.local_part)+'@'+DOMAIN+'</b></div>'+
+                '<div style="font-family:ui-monospace,monospace;font-size:12.5px;word-break:break-all"><b>'+esc(a.local_part)+'@'+esc(aliasDomain)+'</b></div>'+
                 '<div class="muted" style="font-size:11px;margin-top:3px">'+esc(new Date(a.created_at).toLocaleDateString('id-ID', {day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit'}))+'</div>'+
               '</div>'+
               '<div style="flex-shrink:0">'+
@@ -1722,12 +1747,24 @@ export default {
 
         // Mail (aliases)
         if (path === "/api/aliases" && request.method === "GET") {
-          const rows = await env.DB.prepare(
-            `SELECT local_part, domain, disabled, created_at
-             FROM aliases WHERE user_id = ? ORDER BY created_at DESC`
-          )
-            .bind(me.id)
-            .all();
+          const hasDomain = await aliasesHasDomain(env);
+          const allowedDomains = getAllowedDomains(env);
+          const fallbackDomain = allowedDomains[0] || env.DOMAIN || "";
+
+          const rows = hasDomain
+            ? await env.DB.prepare(
+              `SELECT local_part, domain, disabled, created_at
+               FROM aliases WHERE user_id = ? ORDER BY created_at DESC`
+            )
+              .bind(me.id)
+              .all()
+            : await env.DB.prepare(
+              `SELECT local_part, ? as domain, disabled, created_at
+               FROM aliases WHERE user_id = ? ORDER BY created_at DESC`
+            )
+              .bind(fallbackDomain, me.id)
+              .all();
+
           return json({ ok: true, aliases: rows.results || [] });
         }
 
@@ -1736,12 +1773,22 @@ export default {
           if (!body) return badRequest("JSON required");
 
           const local = String(body.local || "").trim().toLowerCase();
-          const domain = String(body.domain || "").trim().toLowerCase();
+          let domain = String(body.domain || "").trim().toLowerCase();
 
           if (!validLocalPart(local)) return badRequest("Mail tidak valid (a-z0-9._+- max 64)");
 
           const allowedDomains = getAllowedDomains(env);
-          if (!allowedDomains.includes(domain)) return badRequest("Domain tidak diizinkan");
+          const fallbackDomain = allowedDomains[0] || env.DOMAIN || "";
+          const hasDomain = await aliasesHasDomain(env);
+
+          if (!fallbackDomain && !hasDomain) return badRequest("Domain belum dikonfigurasi");
+
+          if (hasDomain) {
+            if (!allowedDomains.includes(domain)) return badRequest("Domain tidak diizinkan");
+          } else {
+            if (domain && domain !== fallbackDomain) return badRequest("Domain tidak diizinkan");
+            domain = fallbackDomain;
+          }
 
           const cnt = await env.DB.prepare(
             `SELECT COUNT(*) as c FROM aliases WHERE user_id = ? AND disabled = 0`
@@ -1753,12 +1800,21 @@ export default {
 
           const t = nowSec();
           try {
-            await env.DB.prepare(
-              `INSERT INTO aliases (local_part, domain, user_id, disabled, created_at)
-               VALUES (?, ?, ?, 0, ?)`
-            )
-              .bind(local, domain, me.id, t)
-              .run();
+            if (hasDomain) {
+              await env.DB.prepare(
+                `INSERT INTO aliases (local_part, domain, user_id, disabled, created_at)
+                 VALUES (?, ?, ?, 0, ?)`
+              )
+                .bind(local, domain, me.id, t)
+                .run();
+            } else {
+              await env.DB.prepare(
+                `INSERT INTO aliases (local_part, user_id, disabled, created_at)
+                 VALUES (?, ?, 0, ?)`
+              )
+                .bind(local, me.id, t)
+                .run();
+            }
           } catch (e) {
             const msg = String(e && e.message ? e.message : e);
             if (msg.toUpperCase().includes("UNIQUE")) return badRequest("Mail sudah dipakai");
@@ -1774,19 +1830,40 @@ export default {
           const domain = (url.searchParams.get("domain") || "").trim().toLowerCase();
 
           if (!validLocalPart(local)) return badRequest("Mail invalid");
-          if (!domain) return badRequest("Domain required");
 
-          const own = await env.DB.prepare(
-            `SELECT local_part FROM aliases WHERE local_part = ? AND domain = ? AND user_id = ?`
-          )
-            .bind(local, domain, me.id)
-            .first();
+          const allowedDomains = getAllowedDomains(env);
+          const fallbackDomain = allowedDomains[0] || env.DOMAIN || "";
+          const hasDomain = await aliasesHasDomain(env);
 
-          if (!own) return notFound();
+          if (hasDomain) {
+            if (!domain) return badRequest("Domain required");
 
-          await env.DB.prepare(`DELETE FROM aliases WHERE local_part = ? AND domain = ? AND user_id = ?`)
-            .bind(local, domain, me.id)
-            .run();
+            const own = await env.DB.prepare(
+              `SELECT local_part FROM aliases WHERE local_part = ? AND domain = ? AND user_id = ?`
+            )
+              .bind(local, domain, me.id)
+              .first();
+
+            if (!own) return notFound();
+
+            await env.DB.prepare(`DELETE FROM aliases WHERE local_part = ? AND domain = ? AND user_id = ?`)
+              .bind(local, domain, me.id)
+              .run();
+          } else {
+            if (domain && fallbackDomain && domain !== fallbackDomain) return badRequest("Domain tidak diizinkan");
+
+            const own = await env.DB.prepare(
+              `SELECT local_part FROM aliases WHERE local_part = ? AND user_id = ?`
+            )
+              .bind(local, me.id)
+              .first();
+
+            if (!own) return notFound();
+
+            await env.DB.prepare(`DELETE FROM aliases WHERE local_part = ? AND user_id = ?`)
+              .bind(local, me.id)
+              .run();
+          }
 
           return json({ ok: true });
         }
@@ -1794,29 +1871,56 @@ export default {
         // Emails
         if (path === "/api/emails" && request.method === "GET") {
           const alias = (url.searchParams.get("alias") || "").trim().toLowerCase();
-          const domain = (url.searchParams.get("domain") || "").trim().toLowerCase();
+          let domain = (url.searchParams.get("domain") || "").trim().toLowerCase();
 
           if (!alias || !validLocalPart(alias)) return badRequest("alias required");
-          if (!domain) return badRequest("domain required");
 
-          const own = await env.DB.prepare(
-            `SELECT local_part FROM aliases WHERE local_part = ? AND domain = ? AND user_id = ? AND disabled = 0`
-          )
-            .bind(alias, domain, me.id)
-            .first();
+          const allowedDomains = getAllowedDomains(env);
+          const fallbackDomain = allowedDomains[0] || env.DOMAIN || "";
+          const aliasesDomain = await aliasesHasDomain(env);
+          const emailsDomain = await emailsHasDomain(env);
+
+          if (aliasesDomain || emailsDomain) {
+            if (!domain) return badRequest("domain required");
+          } else {
+            domain = fallbackDomain;
+          }
+
+          const own = aliasesDomain
+            ? await env.DB.prepare(
+              `SELECT local_part FROM aliases WHERE local_part = ? AND domain = ? AND user_id = ? AND disabled = 0`
+            )
+              .bind(alias, domain, me.id)
+              .first()
+            : await env.DB.prepare(
+              `SELECT local_part FROM aliases WHERE local_part = ? AND user_id = ? AND disabled = 0`
+            )
+              .bind(alias, me.id)
+              .first();
 
           if (!own) return forbidden("Mail bukan milikmu / disabled");
 
-          const rows = await env.DB.prepare(
-            `SELECT id, from_addr, to_addr, subject, date, created_at,
-                    substr(COALESCE(text,''), 1, 180) as snippet
-             FROM emails
-             WHERE user_id = ? AND local_part = ? AND domain = ?
-             ORDER BY created_at DESC
-             LIMIT 50`
-          )
-            .bind(me.id, alias, domain)
-            .all();
+          const rows = emailsDomain
+            ? await env.DB.prepare(
+              `SELECT id, from_addr, to_addr, subject, date, created_at,
+                      substr(COALESCE(text,''), 1, 180) as snippet
+               FROM emails
+               WHERE user_id = ? AND local_part = ? AND domain = ?
+               ORDER BY created_at DESC
+               LIMIT 50`
+            )
+              .bind(me.id, alias, domain)
+              .all()
+            : await env.DB.prepare(
+              `SELECT id, from_addr, to_addr, subject, date, created_at,
+                      substr(COALESCE(text,''), 1, 180) as snippet
+               FROM emails
+               WHERE user_id = ? AND local_part = ?
+               ORDER BY created_at DESC
+               LIMIT 50`
+            )
+              .bind(me.id, alias)
+              .all();
 
           return json({ ok: true, emails: rows.results || [] });
         }
@@ -1876,18 +1980,31 @@ export default {
           if (me.role !== "admin") return forbidden("Forbidden");
 
           const userId = decodeURIComponent(path.slice("/api/admin/users/".length, path.length - "/aliases".length));
+          const hasDomain = await aliasesHasDomain(env);
+          const allowedDomains = getAllowedDomains(env);
+          const fallbackDomain = allowedDomains[0] || env.DOMAIN || "";
 
-          const rows = await env.DB.prepare(
-            `SELECT local_part, disabled, created_at
-             FROM aliases
-             WHERE user_id = ?
-             ORDER BY created_at DESC`
-          )
-            .bind(userId)
-            .all();
+          const rows = hasDomain
+            ? await env.DB.prepare(
+              `SELECT local_part, domain, disabled, created_at
+               FROM aliases
+               WHERE user_id = ?
+               ORDER BY created_at DESC`
+            )
+              .bind(userId)
+              .all()
+            : await env.DB.prepare(
+              `SELECT local_part, disabled, created_at
+               FROM aliases
+               WHERE user_id = ?
+               ORDER BY created_at DESC`
+            )
+              .bind(userId)
+              .all();
 
           const aliases = (rows.results || []).map((a) => ({
             ...a,
+            domain: a.domain || fallbackDomain,
             created_at: new Date(a.created_at * 1000).toISOString(),
           }));
 
@@ -1970,6 +2087,9 @@ export default {
   async email(message, env, ctx) {
     try {
       const allowedDomains = getAllowedDomains(env);
+      const hasAliasDomain = await aliasesHasDomain(env);
+      const hasEmailDomain = await emailsHasDomain(env);
+      const fallbackDomain = allowedDomains[0] || env.DOMAIN || "";
       const to = String(message.to || "").toLowerCase();
       const [local, toDomain] = to.split("@");
 
@@ -1978,15 +2098,30 @@ export default {
         return;
       }
 
-      const row = await env.DB.prepare(
-        `SELECT a.local_part as local_part, a.domain as domain, a.user_id as user_id, a.disabled as alias_disabled,
-                u.disabled as user_disabled
-         FROM aliases a
-         JOIN users u ON u.id = a.user_id
-         WHERE a.local_part = ? AND a.domain = ?`
-      )
-        .bind(local, toDomain)
-        .first();
+      if (!hasAliasDomain && fallbackDomain && toDomain !== fallbackDomain) {
+        message.setReject("Bad recipient");
+        return;
+      }
+
+      const row = hasAliasDomain
+        ? await env.DB.prepare(
+          `SELECT a.local_part as local_part, a.domain as domain, a.user_id as user_id, a.disabled as alias_disabled,
+                  u.disabled as user_disabled
+           FROM aliases a
+           JOIN users u ON u.id = a.user_id
+           WHERE a.local_part = ? AND a.domain = ?`
+        )
+          .bind(local, toDomain)
+          .first()
+        : await env.DB.prepare(
+          `SELECT a.local_part as local_part, a.user_id as user_id, a.disabled as alias_disabled,
+                  u.disabled as user_disabled
+           FROM aliases a
+           JOIN users u ON u.id = a.user_id
+           WHERE a.local_part = ?`
+        )
+          .bind(local)
+          .first();
 
       if (!row || row.alias_disabled || row.user_disabled) {
         message.setReject("Unknown recipient");
@@ -2025,27 +2160,51 @@ export default {
         );
       }
 
-      await env.DB.prepare(
-        `INSERT INTO emails
-         (id, local_part, domain, user_id, from_addr, to_addr, subject, date, text, html, raw_key, size, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-        .bind(
-          id,
-          row.local_part,
-          row.domain,
-          row.user_id,
-          fromAddr,
-          toAddr,
-          subject,
-          date,
-          text,
-          htmlPart,
-          raw_key,
-          ab.byteLength || message.rawSize || 0,
-          t
+      if (hasEmailDomain) {
+        const storeDomain = row.domain || toDomain || fallbackDomain;
+        await env.DB.prepare(
+          `INSERT INTO emails
+           (id, local_part, domain, user_id, from_addr, to_addr, subject, date, text, html, raw_key, size, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run();
+          .bind(
+            id,
+            row.local_part,
+            storeDomain,
+            row.user_id,
+            fromAddr,
+            toAddr,
+            subject,
+            date,
+            text,
+            htmlPart,
+            raw_key,
+            ab.byteLength || message.rawSize || 0,
+            t
+          )
+          .run();
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO emails
+           (id, local_part, user_id, from_addr, to_addr, subject, date, text, html, raw_key, size, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            id,
+            row.local_part,
+            row.user_id,
+            fromAddr,
+            toAddr,
+            subject,
+            date,
+            text,
+            htmlPart,
+            raw_key,
+            ab.byteLength || message.rawSize || 0,
+            t
+          )
+          .run();
+      }
     } catch (e) {
       console.log("email handler error:", e && e.stack ? e.stack : e);
       message.setReject("Temporary processing error");
