@@ -976,7 +976,7 @@ const PAGES = {
                   '<span style="flex:1"><b>'+esc(addr)+'</b></span>'+
                   (a.disabled?'<span class="pill">disabled</span>':'')+
                 '</div>'+
-                '<div style="width:100%"><button onclick="delAlias(\\''+a.local_part+'\\',\\''+a.domain+'\\'')" class="danger" style="width:100%">Delete</button></div>'+
+                '<div style="width:100%"><button onclick="delAlias(\\''+a.local_part+'\\',\\''+a.domain+'\\')" class="danger" style="width:100%">Delete</button></div>'+
               '</div>'+
               '<div id="inbox_'+a.local_part+'_'+a.domain.replace(/\\./g,'_')+'" style="display:'+(isOpen?'block':'none')+';margin-top:10px;padding-left:10px"></div>'+
             '</div>';
