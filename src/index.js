@@ -1010,18 +1010,44 @@ const PAGES = {
         }
 
         async function loadEmails(silent=false){
-          if(!SELECTED) return;
+          console.log('📧 === loadEmails START ===');
+          console.log('📧 SELECTED:', SELECTED);
+          if(!SELECTED) {
+            console.log('⚠️ No SELECTED alias!');
+            return;
+          }
           
           const [local, domain] = SELECTED.split('@');
-          const box=document.getElementById('inbox_'+local+'_'+domain.replace(/\./g,'_'));
-          if(!box) return;
+          const inboxId = 'inbox_'+local+'_'+domain.replace(/\./g,'_');
+          console.log('📧 Looking for inbox ID:', inboxId);
+          const box=document.getElementById(inboxId);
+          console.log('📧 Inbox element found:', box);
+          if(!box) {
+            console.error('❌ Inbox container NOT FOUND! ID:', inboxId);
+            return;
+          }
+          
+          // FORCE VISIBILITY
+          box.style.display = 'block';
+          box.style.visibility = 'visible';
+          box.style.opacity = '1';
+          box.style.minHeight = '100px';
+          box.style.background = 'rgba(59,130,246,0.05)';
+          box.style.border = '2px solid rgba(59,130,246,0.3)';
+          box.style.padding = '12px';
+          box.style.borderRadius = '8px';
+          console.log('✅ Forced visibility CSS applied to inbox container');
           
           try{
+            console.log('📧 Fetching emails from API...');
             const j = await api('/api/emails?alias='+encodeURIComponent(local)+'&domain='+encodeURIComponent(domain));
+            console.log('📧 API Response:', j);
             if(!j.ok){ 
+              console.error('❌ API returned error:', j.error);
               if(!silent) alert(j.error||'gagal'); 
               return; 
             }
+            console.log('✅ Number of emails:', j.emails ? j.emails.length : 0);
             
             const refreshInfo = silent ? '<span class="muted" style="font-size:11px;margin-left:8px">\ud83d\udd04 Auto (30s)</span>' : '';
             
@@ -1030,8 +1056,11 @@ const PAGES = {
               '<button class="btn-ghost" onclick="loadEmails()">Refresh</button>'+
               '</div>';
             
-            if(j.emails.length===0){
-              html += '<div class="muted">Belum ada email masuk.</div>';
+            if(!j.emails || j.emails.length===0){
+              html += '<div class="muted" style="padding:24px;text-align:center;background:rgba(255,255,255,0.03);border-radius:8px;border:1px dashed rgba(148,163,184,0.3)">'+
+                '📪 Belum ada email masuk.'+
+              '</div>';
+              console.log('⚠️ No emails to display');
             } else {
               for(const m of j.emails){
                 html += '<div class="mailItem">'+
@@ -1047,10 +1076,20 @@ const PAGES = {
               }
             }
             
+            console.log('📧 Setting innerHTML, HTML length:', html.length);
             box.innerHTML = html;
+            console.log('✅ innerHTML SET! Inbox should be visible now.');
+            console.log('📧 Final box styles:', {
+              display: box.style.display,
+              visibility: box.style.visibility,
+              opacity: box.style.opacity
+            });
           }catch(e){
+            console.error('❌ Load emails error:', e);
+            console.error('Error stack:', e.stack);
             if(!silent) console.error('Load emails error:', e);
           }
+          console.log('📧 === loadEmails END ===');
         }
 
         function wrapEmailHtml(inner){
@@ -1899,7 +1938,7 @@ export default {
         // Emails
         if (path === "/api/emails" && request.method === "GET") {
           const alias = (url.searchParams.get("alias") || "").trim().toLowerCase();
-          let domain = (url.searchParams.get("domain") || "").trim().toLowerCase();
+          let domainParam = (url.searchParams.get("domain") || "").trim().toLowerCase();
 
           if (!alias || !validLocalPart(alias)) return badRequest("alias required");
 
@@ -1908,40 +1947,59 @@ export default {
           const aliasesDomain = await aliasesHasDomain(env);
           const emailsDomain = await emailsHasDomain(env);
 
-          if (aliasesDomain || emailsDomain) {
-            if (aliasesDomain && !domain) return badRequest("domain required");
-            if (!aliasesDomain && !domain) domain = fallbackDomain;
-          } else {
-            domain = fallbackDomain;
-          }
+          // Resolve ownership and canonical domain (if the aliases table has a domain column)
+          let domain = domainParam;
+          if (aliasesDomain) {
+            if (domain) {
+              const owned = await env.DB.prepare(
+                `SELECT domain FROM aliases WHERE local_part = ? AND domain = ? AND user_id = ? AND disabled = 0`
+              )
+                .bind(alias, domain, me.id)
+                .first();
 
-          const own = aliasesDomain
-            ? await env.DB.prepare(
-              `SELECT local_part FROM aliases WHERE local_part = ? AND domain = ? AND user_id = ? AND disabled = 0`
-            )
-              .bind(alias, domain, me.id)
-              .first()
-            : await env.DB.prepare(
+              if (!owned) return forbidden("Mail bukan milikmu / disabled");
+              domain = owned.domain;
+            } else {
+              const ownedRows = await env.DB.prepare(
+                `SELECT domain FROM aliases WHERE local_part = ? AND user_id = ? AND disabled = 0`
+              )
+                .bind(alias, me.id)
+                .all();
+
+              const list = ownedRows.results || [];
+              if (list.length === 0) return forbidden("Mail bukan milikmu / disabled");
+              if (list.length > 1) return badRequest("domain required");
+              domain = list[0].domain;
+            }
+          } else {
+            const owned = await env.DB.prepare(
               `SELECT local_part FROM aliases WHERE local_part = ? AND user_id = ? AND disabled = 0`
             )
               .bind(alias, me.id)
               .first();
 
-          if (!own) return forbidden("Mail bukan milikmu / disabled");
+            if (!owned) return forbidden("Mail bukan milikmu / disabled");
+          }
 
-          const rows = emailsDomain
-            ? aliasesDomain
-              ? await env.DB.prepare(
-                `SELECT id, from_addr, to_addr, subject, date, created_at,
-                        substr(COALESCE(text,''), 1, 180) as snippet
-                 FROM emails
-                 WHERE user_id = ? AND local_part = ? AND domain = ?
-                 ORDER BY created_at DESC
-                 LIMIT 50`
-              )
-                .bind(me.id, alias, domain)
-                .all()
-              : await env.DB.prepare(
+          // Pick domain for the emails query when the emails table supports it
+          let domainForEmails = domain || fallbackDomain;
+
+          let rows;
+          if (emailsDomain) {
+            const primary = await env.DB.prepare(
+              `SELECT id, from_addr, to_addr, subject, date, created_at,
+                      substr(COALESCE(text,''), 1, 180) as snippet
+               FROM emails
+               WHERE user_id = ? AND local_part = ? AND domain = ?
+               ORDER BY created_at DESC
+               LIMIT 50`
+            )
+              .bind(me.id, alias, domainForEmails)
+              .all();
+
+            // Fallback: if nothing found with domain filter (mismatch/legacy data), try without domain
+            if (!primary.results || primary.results.length === 0) {
+              const alt = await env.DB.prepare(
                 `SELECT id, from_addr, to_addr, subject, date, created_at,
                         substr(COALESCE(text,''), 1, 180) as snippet
                  FROM emails
@@ -1950,8 +2008,14 @@ export default {
                  LIMIT 50`
               )
                 .bind(me.id, alias)
-                .all()
-            : await env.DB.prepare(
+                .all();
+
+              rows = alt;
+            } else {
+              rows = primary;
+            }
+          } else {
+            rows = await env.DB.prepare(
               `SELECT id, from_addr, to_addr, subject, date, created_at,
                       substr(COALESCE(text,''), 1, 180) as snippet
                FROM emails
@@ -1961,6 +2025,7 @@ export default {
             )
               .bind(me.id, alias)
               .all();
+          }
 
           return json({ ok: true, emails: rows.results || [] });
         }
