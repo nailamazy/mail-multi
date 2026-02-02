@@ -1570,17 +1570,30 @@ export default {
           }
 
           // Auto-create initial alias with username@domain
-          const domain = String(body.domain || "").trim().toLowerCase();
+          let domain = String(body.domain || "").trim().toLowerCase();
           const allowedDomains = getAllowedDomains(env);
-          const selectedDomain = allowedDomains.includes(domain) ? domain : (allowedDomains[0] || env.DOMAIN);
+          const fallbackDomain = allowedDomains[0] || env.DOMAIN || "";
+          const hasDomain = await aliasesHasDomain(env);
+
+          if (!domain) domain = fallbackDomain;
+          const selectedDomain = allowedDomains.includes(domain) ? domain : fallbackDomain;
 
           try {
-            await env.DB.prepare(
-              `INSERT INTO aliases (local_part, domain, user_id, disabled, created_at)
-               VALUES (?, ?, ?, 0, ?)`
-            )
-              .bind(username, selectedDomain, id, t)
-              .run();
+            if (hasDomain) {
+              await env.DB.prepare(
+                `INSERT INTO aliases (local_part, domain, user_id, disabled, created_at)
+                 VALUES (?, ?, ?, 0, ?)`
+              )
+                .bind(username, selectedDomain, id, t)
+                .run();
+            } else {
+              await env.DB.prepare(
+                `INSERT INTO aliases (local_part, user_id, disabled, created_at)
+                 VALUES (?, ?, 0, ?)`
+              )
+                .bind(username, id, t)
+                .run();
+            }
           } catch (e) {
             console.log("auto-create alias error:", e);
             // Continue even if alias creation fails
@@ -1784,7 +1797,14 @@ export default {
           if (!fallbackDomain && !hasDomain) return badRequest("Domain belum dikonfigurasi");
 
           if (hasDomain) {
-            if (!allowedDomains.includes(domain)) return badRequest("Domain tidak diizinkan");
+            if (!domain) domain = fallbackDomain;
+            if (allowedDomains.length > 0) {
+              if (!allowedDomains.includes(domain)) return badRequest("Domain tidak diizinkan");
+            } else if (fallbackDomain) {
+              if (domain !== fallbackDomain) return badRequest("Domain tidak diizinkan");
+            } else {
+              return badRequest("Domain belum dikonfigurasi");
+            }
           } else {
             if (domain && domain !== fallbackDomain) return badRequest("Domain tidak diizinkan");
             domain = fallbackDomain;
