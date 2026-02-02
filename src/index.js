@@ -1175,6 +1175,14 @@ const PAGES = {
           location.href='/login';
         }
 
+        // expose functions for inline handlers
+        window.createAlias = createAlias;
+        window.selectAlias = selectAlias;
+        window.delAlias = delAlias;
+        window.openEmail = openEmail;
+        window.delEmail = delEmail;
+        window.logout = logout;
+
         (async ()=>{
           try{
             await loadMe();
