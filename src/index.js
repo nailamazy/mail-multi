@@ -920,6 +920,12 @@ const PAGES = {
           }catch{ return String(v); }
         }
 
+        // consistent builder for inbox DOM id to avoid mismatches
+        function inboxDomId(local, domain){
+          const safeDomain = String(domain||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
+          return 'inbox_'+local+'_'+safeDomain;
+        }
+
         async function api(path, opts){
           const r = await fetch(path, opts);
           const j = await r.json().catch(()=>null);
@@ -966,6 +972,7 @@ const PAGES = {
             var a = j.aliases[i];
             var addr = a.local_part+'@'+a.domain;
             var isOpen = SELECTED===a.local_part+'@'+a.domain;
+            var inboxId = inboxDomId(a.local_part, a.domain);
             
             html += '<div style="margin-bottom:10px;display:block;width:100%">'+
               '<div class="listItem" style="display:flex;flex-direction:column;width:100%;gap:10px">'+
@@ -978,7 +985,7 @@ const PAGES = {
                 '</div>'+
                 '<div style="width:100%"><button onclick="delAlias(\\''+a.local_part+'\\',\\''+a.domain+'\\')" class="danger" style="width:100%">Delete</button></div>'+
               '</div>'+
-              '<div id="inbox_'+a.local_part+'_'+a.domain.replace(/\\./g,'_')+'" style="display:'+(isOpen?'block':'none')+';margin-top:10px;padding-left:10px"></div>'+
+              '<div id="'+inboxId+'" style="display:'+(isOpen?'block':'none')+';margin-top:10px;padding-left:10px"></div>'+
             '</div>';
             
             console.log('Added alias:', addr); // DEBUG
@@ -1018,7 +1025,7 @@ const PAGES = {
           }
           
           const [local, domain] = SELECTED.split('@');
-          const inboxId = 'inbox_'+local+'_'+domain.replace(/\./g,'_');
+          const inboxId = inboxDomId(local, domain);
           console.log('📧 Looking for inbox ID:', inboxId);
           const box=document.getElementById(inboxId);
           console.log('📧 Inbox element found:', box);
