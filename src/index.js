@@ -1909,7 +1909,8 @@ export default {
           const emailsDomain = await emailsHasDomain(env);
 
           if (aliasesDomain || emailsDomain) {
-            if (!domain) return badRequest("domain required");
+            if (aliasesDomain && !domain) return badRequest("domain required");
+            if (!aliasesDomain && !domain) domain = fallbackDomain;
           } else {
             domain = fallbackDomain;
           }
@@ -1929,16 +1930,27 @@ export default {
           if (!own) return forbidden("Mail bukan milikmu / disabled");
 
           const rows = emailsDomain
-            ? await env.DB.prepare(
-              `SELECT id, from_addr, to_addr, subject, date, created_at,
-                      substr(COALESCE(text,''), 1, 180) as snippet
-               FROM emails
-               WHERE user_id = ? AND local_part = ? AND domain = ?
-               ORDER BY created_at DESC
-               LIMIT 50`
-            )
-              .bind(me.id, alias, domain)
-              .all()
+            ? aliasesDomain
+              ? await env.DB.prepare(
+                `SELECT id, from_addr, to_addr, subject, date, created_at,
+                        substr(COALESCE(text,''), 1, 180) as snippet
+                 FROM emails
+                 WHERE user_id = ? AND local_part = ? AND domain = ?
+                 ORDER BY created_at DESC
+                 LIMIT 50`
+              )
+                .bind(me.id, alias, domain)
+                .all()
+              : await env.DB.prepare(
+                `SELECT id, from_addr, to_addr, subject, date, created_at,
+                        substr(COALESCE(text,''), 1, 180) as snippet
+                 FROM emails
+                 WHERE user_id = ? AND local_part = ?
+                 ORDER BY created_at DESC
+                 LIMIT 50`
+              )
+                .bind(me.id, alias)
+                .all()
             : await env.DB.prepare(
               `SELECT id, from_addr, to_addr, subject, date, created_at,
                       substr(COALESCE(text,''), 1, 180) as snippet
