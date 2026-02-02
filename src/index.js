@@ -698,12 +698,13 @@ const PAGES = {
           const username = document.getElementById('u').value.trim();
           const email = document.getElementById('e').value.trim();
           const pw = document.getElementById('pw').value;
+          const domain = document.getElementById('domain').value;
           const out = document.getElementById('out');
           out.textContent = '...';
           const r = await fetch('/api/auth/signup',{
             method:'POST',
             headers:{'content-type':'application/json'},
-            body:JSON.stringify({username,email,pw})
+            body:JSON.stringify({username,email,pw,domain})
           });
           const j = await readJsonOrText(r);
           if(j.ok){ location.href='/app'; return; }
@@ -1541,6 +1542,23 @@ export default {
             if (msg.toUpperCase().includes("UNIQUE")) return badRequest("Username/email sudah dipakai");
             console.log("signup db error:", msg);
             return json({ ok: false, error: "DB error" }, 500);
+          }
+
+          // Auto-create initial alias with username@domain
+          const domain = String(body.domain || "").trim().toLowerCase();
+          const allowedDomains = getAllowedDomains(env);
+          const selectedDomain = allowedDomains.includes(domain) ? domain : (allowedDomains[0] || env.DOMAIN);
+
+          try {
+            await env.DB.prepare(
+              `INSERT INTO aliases (local_part, domain, user_id, disabled, created_at)
+               VALUES (?, ?, ?, 0, ?)`
+            )
+              .bind(username, selectedDomain, id, t)
+              .run();
+          } catch (e) {
+            console.log("auto-create alias error:", e);
+            // Continue even if alias creation fails
           }
 
           const ttl = safeInt(env.SESSION_TTL_SECONDS, 1209600);
